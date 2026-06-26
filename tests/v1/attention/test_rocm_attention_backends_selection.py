@@ -74,11 +74,12 @@ def mock_on_mi3xx():
             "ROCM_AITER_FA",
             AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
-        # Test Case 5: Explicit ROCM_AITER_UNIFIED_ATTN backend
+        # Test Case 5: Explicit ROCM_AITER_UNIFIED_ATTN backend with fp16
+        # KV cache is rejected.
         (
             {},
             "ROCM_AITER_UNIFIED_ATTN",
-            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
+            None,
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1
         (
@@ -145,6 +146,14 @@ def test_standard_attention_backend_selection(
         has_sink=False,
         use_sparse=False,
     )
+
+    if expected_backend_path is None:
+        with pytest.raises(ValueError, match="float16 KV cache not supported"):
+            RocmPlatform.get_attn_backend_cls(
+                selected_backend=backend_enum,
+                attn_selector_config=attn_selector_config,
+            )
+        return
 
     backend_path = RocmPlatform.get_attn_backend_cls(
         selected_backend=backend_enum, attn_selector_config=attn_selector_config
