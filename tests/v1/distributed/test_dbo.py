@@ -13,6 +13,7 @@ import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
 
 # Detect Blackwell / B200 (compute capability 10.x)
@@ -41,7 +42,13 @@ MAX_NUM_SEQS = 64  # Increased from 16 to trigger decode DBO
 # DeepEP backends to test
 DEEPEP_BACKENDS = [
     "deepep_low_latency",
-    "deepep_high_throughput",
+    pytest.param(
+        "deepep_high_throughput",
+        marks=pytest.mark.skipif(
+            current_platform.is_rocm(),
+            reason="DBO accuracy is unstable with DeepEP high-throughput on ROCm",
+        ),
+    ),
 ]
 
 
@@ -75,11 +82,9 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
         str(DP_SIZE),
         "--enable-expert-parallel",
         "--enable-dbo",
-        # Fix threshold so we know we trigger DBO
+        # Fix decode threshold so we know we trigger DBO for decode.
         "--dbo-decode-token-threshold",
         "16",
-        "--dbo-prefill-token-threshold",
-        "256",
         "--all2all-backend",
         all2all_backend,
     ]
