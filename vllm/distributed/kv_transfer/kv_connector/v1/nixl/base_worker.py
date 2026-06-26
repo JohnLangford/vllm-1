@@ -215,10 +215,12 @@ class NixlBaseConnectorWorker:
         if n_regions == 0 or self.num_regions == 0:
             return [False] * num_fa_descs
         nblk = num_fa_descs // self.num_regions
+        virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
         flags: list[bool] = []
         for i in range(n_regions):
             replicated = self._is_region_replicated(i)
-            flags.extend([replicated] * nblk)
+            num_streams = 1 if replicated or not virtually_split else 2
+            flags.extend([replicated] * (num_streams * nblk))
         assert len(flags) == num_fa_descs, (
             f"FA desc flags {len(flags)} != num_fa_descs {num_fa_descs}"
         )
@@ -1110,6 +1112,15 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
+        if self.transfer_topo.virtually_split_kv_in_blocks:
+            # Hybrid Mamba block metadata indexes the shared block allocation as
+            # two logical streams. Keep FA descriptors in that shape so prefix
+            # cache block IDs address the same descriptor ranges as SSM blocks.
+            self.num_regions = sum(
+                1 if self._is_region_replicated(i) else 2
+                for i in range(len(self._region_is_mla))
+            )
+
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
 
@@ -1273,6 +1284,19 @@ class NixlBaseConnectorWorker:
                 block_offset = block_id * page_stride
                 addr = base_addr + block_offset
                 result.append((addr, kv_block_len, self.device_id))
+
+            if (
+                self.transfer_topo.virtually_split_kv_in_blocks
+                and not self._is_region_replicated(i)
+            ):
+                second_split = self.get_backend_aware_kv_block_len(
+                    layer_idx=i, first_split=False, mamba_view=False
+                )
+                for block_id in range(num_blocks):
+                    block_offset = block_id * page_stride
+                    addr = base_addr + block_offset
+                    second_addr = addr + kv_block_len
+                    result.append((second_addr, second_split, self.device_id))
         return result
 
     def _build_fa_remote(
@@ -1317,6 +1341,22 @@ class NixlBaseConnectorWorker:
                 # tp rank of size local_block_len.
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
+
+            emits_second_stream = (
+                self.transfer_topo.virtually_split_kv_in_blocks and not replicated
+            )
+            if emits_second_stream:
+                second_split = self.get_backend_aware_kv_block_len(
+                    layer_idx=i, first_split=False, mamba_view=False
+                )
+                second_split = second_split // num_reads
+                for block_id in range(num_blocks):
+                    block_offset = block_id * page_size
+                    addr = base_addr + block_offset + rank_offset
+                    second_addr = addr + nixl_agent_meta.block_lens[i] // 2
+                    result.append(
+                        (second_addr, second_split, nixl_agent_meta.device_id)
+                    )
         return result
 
     def register_local_xfer_handler(
@@ -2252,7 +2292,11 @@ class NixlBaseConnectorWorker:
         if self.transfer_topo.virtually_split_kv_in_blocks and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
-            block_len = self.block_len_per_layer[layer_idx]
+            half_block = (
+                self.transfer_topo.virtually_split_kv_in_blocks
+                and not self._is_region_replicated(layer_idx)
+            )
+            block_len = self.block_len_per_layer[layer_idx] // (2 if half_block else 1)
         return block_len
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:

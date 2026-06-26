@@ -1067,7 +1067,7 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_hybrid_mamba_attention_remote_descs_use_packed_head_slices(
+    def test_hybrid_mamba_attention_remote_descs_use_virtual_streams(
         self, default_vllm_config, dist_init
     ):
         worker = FakeNixlConnectorWorker(
@@ -1106,8 +1106,9 @@ class TestNixlHandshake:
             block_lens=[remote_block_len],
         )
 
-        assert worker.get_backend_aware_kv_block_len(0, mamba_view=False) == (
-            local_block_len
+        assert (
+            worker.get_backend_aware_kv_block_len(0, mamba_view=False)
+            == local_block_len // 2
         )
         assert (
             worker.get_backend_aware_kv_block_len(0, first_split=True, mamba_view=True)
@@ -1119,7 +1120,12 @@ class TestNixlHandshake:
         )
 
         assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
-            (0x1000 + local_block_len, local_block_len, 0)
+            (0x1000 + local_block_len // 2, local_block_len // 2, 0),
+            (
+                0x1000 + remote_block_len // 2 + local_block_len // 2,
+                local_block_len // 2,
+                0,
+            ),
         ]
 
     @patch(
